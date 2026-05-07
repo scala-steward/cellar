@@ -6,6 +6,7 @@ import mill.scalalib._
 import mill.scalalib.Assembly
 import mill.scalalib.publish._
 import mill.javalib.NativeImageModule
+import mill.javalib.SonatypeCentralPublishModule
 import com.goyeau.mill.scalafix.ScalafixModule
 
 trait CommonScalaModule extends ScalaModule with ScalafixModule {
@@ -14,8 +15,24 @@ trait CommonScalaModule extends ScalaModule with ScalafixModule {
   def scalacOptions = Seq("-deprecation", "-feature", "-Wunused:all")
 }
 
-// Minimal PomSettings for test fixtures
-object lib extends CommonScalaModule {
+def cellarVersion: T[String] = Task.Input {
+  sys.env.getOrElse("CELLAR_VERSION", "0.1.0-SNAPSHOT").stripPrefix("v")
+}
+
+def cellarPom(desc: String) = PomSettings(
+  description    = desc,
+  organization   = "org.virtuslab",
+  url            = "https://github.com/VirtusLab/cellar",
+  licenses       = Seq(License.`MPL-2.0`),
+  versionControl = VersionControl.github("VirtusLab", "cellar"),
+  developers     = Seq(Developer("rochala", "Jakub Rochala", "https://github.com/rochala"))
+)
+
+object lib extends CommonScalaModule with SonatypeCentralPublishModule {
+  def publishVersion = cellarVersion()
+  def artifactName   = "cellar-lib"
+  def pomSettings    = cellarPom("Programmatic access to JVM dependency APIs (Scala 3, Scala 2, Java)")
+
   def mvnDeps = Seq(
     mvn"org.typelevel::cats-effect:3.5.7",
     mvn"co.fs2::fs2-io:3.11.0",
@@ -54,10 +71,16 @@ object lib extends CommonScalaModule {
   }
 }
 
-object cli extends CommonScalaModule with NativeImageModule {
-  def moduleDeps = Seq(lib)
-  def mainClass = Some("cellar.cli.CellarApp")
+object cli extends CommonScalaModule with NativeImageModule with SonatypeCentralPublishModule {
+  def moduleDeps  = Seq(lib)
+  def mainClass   = Some("cellar.cli.CellarApp")
 
+  def publishVersion = cellarVersion()
+  def artifactName   = "cellar-cli"
+  def pomSettings    = cellarPom("Cellar command-line interface — JVM dependency API explorer")
+
+  // Only consumed in native-image mode (JRT filesystem is unreliable there —
+  // graal#10013), so kept off `resources` to avoid bloating the published lib JAR.
   def bundledJreJar: T[PathRef] = Task {
     import java.net.URI
     import java.nio.file.{Files, FileSystems}
@@ -88,10 +111,8 @@ object cli extends CommonScalaModule with NativeImageModule {
     PathRef(Task.dest)
   }
 
-  override def resources = super.resources() ++ Seq(bundledJreJar())
-
-  def cellarVersion: T[String] = Task.Input {
-    sys.env.getOrElse("CELLAR_VERSION", "0.1.0-SNAPSHOT").stripPrefix("v")
+  override def nativeImageClasspath = Task {
+    super.nativeImageClasspath() ++ Seq(bundledJreJar())
   }
 
   def generatedSources = Task {

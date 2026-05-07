@@ -5,19 +5,25 @@ This document describes how to cut a release, what artifacts are produced, and h
 ## Cutting a release
 
 1. Ensure the `main` branch is in a releasable state and tests pass.
-2. Push a version tag (the workflow triggers on `v*`):
+2. Trigger the [Release workflow](.github/workflows/release.yml) manually — either via the GitHub Actions UI ("Run workflow" → enter version without `v` prefix) or via `gh`:
 
    ```sh
-   git tag v1.2.3
-   git push origin v1.2.3
+   gh workflow run release.yml -f version=1.2.3
    ```
 
-3. The [Release workflow](.github/workflows/release.yml) runs automatically and:
+   All jobs check out `main`, so the dispatch ref is irrelevant.
+
+3. The workflow:
    - Builds GraalVM native binaries for all supported platforms in parallel.
    - Packages each binary into a platform-appropriate archive.
+   - Publishes the `lib` and `cli` modules to Maven Central as `org.virtuslab:cellar-lib_3:<version>` and `org.virtuslab:cellar-cli_3:<version>`.
    - Generates a SHA256 checksum file.
    - Signs the checksum file using cosign keyless (OIDC).
+   - Updates `flake.nix` with the new version and SRI hashes, commits to `main`.
+   - Creates and pushes a `v<version>` git tag.
    - Publishes a GitHub Release with all artifacts attached.
+
+The Maven publish runs in parallel with the binary builds and blocks the GitHub Release; if Sonatype rejects the upload (e.g. duplicate version, namespace mismatch, signature failure), no GitHub Release is created and no tag is pushed.
 
 No container images are built or published by this release flow.
 
@@ -40,6 +46,39 @@ Each GitHub Release contains:
 | `cellar-<version>-<os>-<arch>.tar.gz` | Archive containing the `cellar` binary and `README.md` |
 | `checksums.txt` | SHA256 checksums for all archives |
 | `checksums.txt.bundle` | Sigstore bundle for the checksum file |
+
+## Maven Central artifacts
+
+Two modules are published per release:
+
+| Coordinate | Contents |
+|---|---|
+| `org.virtuslab:cellar-lib_3:<version>` | The dependency-API library — symbol resolver, formatters, Maven coordinate parsing, etc. |
+| `org.virtuslab:cellar-cli_3:<version>` | The CLI driver (`cellar.cli.CellarApp` and friends). Regular Scala library JAR — does **not** include the bundled JRE blob used by the GraalVM native image. |
+
+`cellar-lib` is what coursier resolves for `cs install cellar` — the [coursier/apps](https://github.com/coursier/apps) descriptor reads `maven-metadata.xml` for `cellar-lib_3` to determine the latest version, then downloads the matching native binary from this repo's GitHub Release.
+
+Both modules are independently usable as Scala 3 dependencies:
+
+```scala
+mvn"org.virtuslab::cellar-lib:<version>"
+mvn"org.virtuslab::cellar-cli:<version>"
+```
+
+### Required GitHub secrets
+
+The Maven publish step in `.github/workflows/release.yml` reads four repository secrets:
+
+| Secret | Purpose |
+|---|---|
+| `SONATYPE_USERNAME` | Central Portal user-token name (generated at central.sonatype.com) |
+| `SONATYPE_PASSWORD` | Central Portal user-token value |
+| `PGP_SECRET` | Base64-encoded ASCII-armored PGP private key (artifact signatures) |
+| `PGP_PASSPHRASE` | Passphrase for the PGP key |
+
+Mill reads these via `MILL_SONATYPE_USERNAME` / `MILL_SONATYPE_PASSWORD` / `MILL_PGP_SECRET_BASE64` / `MILL_PGP_PASSPHRASE` environment variables.
+
+The PGP signing here is unrelated to the cosign signing of `checksums.txt` — Sonatype Central mandates `.asc` signatures on every uploaded artifact (`.jar`, `.pom`, `-sources.jar`, `-javadoc.jar`), while cosign covers the GitHub Release assets.
 
 ## Verifying checksums
 
